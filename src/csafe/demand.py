@@ -153,16 +153,21 @@ def estimate_weights(net: RoadNet, history_nodes: np.ndarray, prior: np.ndarray,
     This is what a placement optimiser may use in practice. It never sees the weights the simulator
     draws test incidents from, so its advantage cannot come from knowing the answer.
     """
-    import scipy.sparse as sp
     from scipy.spatial import cKDTree
 
     xy = net._xy(net.lat, net.lon)
     tree = cKDTree(xy)
-    d = tree.sparse_distance_matrix(tree, 3 * sigma_m, output_type="coo_matrix")
-    K = sp.coo_matrix((np.exp(-(d.data**2) / (2 * sigma_m**2)), (d.row, d.col)), shape=d.shape).tocsr()
-    K = K + sp.identity(net.n, format="csr")  # distance-0 pairs are dropped by the sparse matrix
     counts = np.bincount(history_nodes, minlength=net.n).astype(float)
-    smooth = K @ counts
+    # smooth = K @ counts, with K[i, j] = exp(-d^2 / 2 sigma^2) within 3 sigma, plus the identity.
+    # K has ~10 million entries for a 12,000-junction city, so building it whole costs over 500 MB. Only
+    # junctions that had an incident contribute, and we take them a few hundred at a time: same numbers, a tenth of the memory.
+    smooth = counts.copy()
+    src = np.flatnonzero(counts)
+    for a in range(0, len(src), 400):
+        J = src[a:a + 400]
+        d = cKDTree(xy[J]).sparse_distance_matrix(tree, 3 * sigma_m, output_type="coo_matrix")
+        k = np.exp(-(d.data ** 2) / (2 * sigma_m ** 2)) * counts[J[d.row]]
+        smooth += np.bincount(d.col, weights=k, minlength=net.n)
     smooth = smooth / smooth.sum() if smooth.sum() > 0 else prior
     est = (1 - prior_share) * smooth + prior_share * prior
     return est / est.sum()
